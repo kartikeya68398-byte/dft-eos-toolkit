@@ -1,0 +1,242 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+
+def murnaghan(V, E0, B0, Bp, V0):
+    term1 = (B0 * V) / Bp
+    term2 = ((V0 / V)**Bp) / (Bp - 1) + 1
+    term3 = (B0 * V0) / (Bp - 1)
+    return E0 + term1 * term2 - term3
+
+def birch_murnaghan(V, E0, B0, Bp, V0):
+    eta = (V0 / V) ** (2/3)
+    term1 = ((eta - 1) ** 3) * Bp
+    term2 = ((eta - 1) ** 2) * (6 - 4 * eta)
+    return E0 + (9 * V0 * B0 / 16) * (term1 + term2)
+
+def vinet_rose(V, E0, B0, Bp, V0):
+    eta = (V / V0) ** (1/3)
+    xi = 1.5 * (Bp - 1)
+    term1 = (9 * B0 * V0) / (xi**2)
+    term2 = 1 + (xi * (1 - eta) - 1) * np.exp(xi * (1 - eta))
+    return E0 + term1 * term2
+
+def poirier_tarantola(V, E0, B0, Bp, V0):
+    ln_val = np.log(V0 / V)
+    term1 = (B0 * V0 / 2.0) * (ln_val ** 2)
+    term2 = (B0 * V0 / 6.0) * (ln_val ** 3) * (Bp - 2)
+    return E0 + term1 + term2
+
+def calculate_pressure(eos_func, V_array, popt):
+    dV = 1e-5
+    E_plus = eos_func(V_array + dV, *popt)
+    E_minus = eos_func(V_array - dV, *popt)
+    P_atomic = -(E_plus - E_minus) / (2 * dV)
+    return P_atomic * 14710.5
+
+
+target_file = input("Enter the name of your data file (e.g., data.txt): ").strip()
+
+if not target_file.endswith('.txt'):
+    target_file += '.txt'
+
+print(f"\nLoading data from '{target_file}'...")
+
+V_list = []
+E_list = []
+
+try:
+    with open(target_file, "r") as file:
+        for line in file:
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    v_val = float(parts[0])
+                    e_val = float(parts[1])
+                    V_list.append(v_val)
+                    E_list.append(e_val)
+                except ValueError:
+                    pass
+
+    V = np.array(V_list)
+    E = np.array(E_list)
+
+    if len(V) == 0:
+        print(f"ERROR: Found '{target_file}', but couldn't extract any valid numbers!")
+        exit()
+
+    print(f"Successfully loaded {len(V)} clean data points!")
+
+except FileNotFoundError:
+    print(f"ERROR: Could not find '{target_file}'. Please ensure it is in the same folder.")
+    exit()
+
+grid_input = input("\nEnable grid lines on all generated graphs? (y/n): ").strip().lower()
+show_grid = True if grid_input == 'y' else False
+
+guess_E0, guess_V0 = np.min(E), V[np.argmin(E)]
+
+try:
+    b0_gpa_guess = float(input("\nEnter an approximate Bulk Modulus guess for this element (in GPa): ").strip())
+except ValueError:
+    print("Invalid input detected. Defaulting to 90.0 GPa.")
+    b0_gpa_guess = 90.0
+
+guess_B0_atomic = b0_gpa_guess / 14710.5
+initial_guesses = [guess_E0, guess_B0_atomic, 4.0, guess_V0]
+
+
+history = []
+
+while True:
+    print("\nSelect the Equation of State to fit:")
+    print("  1. Murnaghan")
+    print("  2. Birch-Murnaghan")
+    print("  3. Vinet-Rose")
+    print("  4. Poirier-Tarantola")
+
+    choice = input("Enter 1, 2, 3, or 4: ").strip()
+
+    if choice == '1':
+        selected_eos, eos_name = murnaghan, "Murnaghan"
+    elif choice == '2':
+        selected_eos, eos_name = birch_murnaghan, "Birch-Murnaghan"
+    elif choice == '3':
+        selected_eos, eos_name = vinet_rose, "Vinet-Rose"
+    elif choice == '4':
+        selected_eos, eos_name = poirier_tarantola, "Poirier-Tarantola"
+    else:
+        print("Invalid input. Try again.")
+        continue
+
+    popt, pcov = curve_fit(selected_eos, V, E, p0=initial_guesses)
+    E0_final, B0_final, Bp_final, V0_final = popt
+
+    history.append((eos_name, selected_eos, popt))
+
+    print(f"\n--- {eos_name} Results ---")
+    print(f"E0: {E0_final:.6f} Ry/atom")
+    print(f"V0: {V0_final * 0.148185:.3f} Å³/atom")
+    print(f"B0: {B0_final * 14710.5:.3f} GPa")
+    print(f"Bp: {Bp_final:.3f}")
+
+    print("\n-- Data Export Options --")
+    export_orig = input(f"Export the original dataset WITH calculated pressures for {eos_name}? (y/n): ").strip().lower()
+    if export_orig == 'y':
+        P_orig_gpa = calculate_pressure(selected_eos, V, popt)
+        filename_orig = f"{eos_name}_Original_with_Pressure.txt"
+        np.savetxt(filename_orig, np.column_stack((V, E, P_orig_gpa)),
+                   fmt='%.6f', delimiter='    ',
+                   header=f"{eos_name} Fit on Original Data\nVolume(bohr^3)    Energy(Ry)    Pressure(GPa)")
+        print(f">> Original data with pressures successfully saved to {filename_orig}!")
+
+    export_txt = input(f"Export a high-density 1000-point V-E-P dataset for {eos_name}? (y/n): ").strip().lower()
+    export_png = input(f"Generate standalone high-density graphs (Energy & Pressure) for {eos_name}? (y/n): ").strip().lower()
+
+    if export_txt == 'y' or export_png == 'y':
+        v_min_extended = np.min(V) * 0.90
+        v_max_extended = np.max(V) * 1.10
+
+        V_1000 = np.linspace(v_min_extended, v_max_extended, 1000)
+        E_1000 = selected_eos(V_1000, *popt)
+        P_1000_gpa = calculate_pressure(selected_eos, V_1000, popt)
+
+        if export_txt == 'y':
+            filename_txt = f"{eos_name}_1000pts_with_Pressure.txt"
+            np.savetxt(filename_txt, np.column_stack((V_1000, E_1000, P_1000_gpa)),
+                       fmt='%.6f', delimiter='    ',
+                       header=f"{eos_name} 1000-Point Fit\nVolume(bohr^3)    Energy(Ry)    Pressure(GPa)")
+            print(f">> High-density 3-column data successfully saved to {filename_txt}!")
+
+        if export_png == 'y':
+            print(f">> Generating Energy-Volume graph for {eos_name}...")
+            plt.figure(figsize=(8, 5))
+            plt.scatter(V_1000, E_1000, color='blue', s=1, label='1000 Generated Points')
+            plt.scatter(V, E, color='red', s=40, label='Original Input Data', zorder=5)
+            plt.title(f"{eos_name} - Energy vs Volume", fontsize=12, fontweight='bold')
+            plt.xlabel("Volume (bohr³/atom)")
+            plt.ylabel("Energy (Ry/atom)")
+            plt.legend()
+            if show_grid:
+                plt.grid(True, linestyle='--', alpha=0.5)
+            filename_e_png = f"{eos_name}_Energy_1000pts.png"
+            plt.savefig(filename_e_png, dpi=300, bbox_inches='tight')
+            
+            print(f">> Generating Pressure-Volume graph for {eos_name}...")
+            plt.figure(figsize=(8, 5))
+            plt.plot(V_1000, P_1000_gpa, color='green', linewidth=2, label=f'{eos_name} Pressure')
+            plt.title(f"{eos_name} - Pressure vs Volume", fontsize=12, fontweight='bold')
+            plt.xlabel("Volume (bohr³/atom)")
+            plt.ylabel("Pressure (GPa)")
+            plt.legend()
+            if show_grid:
+                plt.grid(True, linestyle='--', alpha=0.5)
+            filename_p_png = f"{eos_name}_Pressure_1000pts.png"
+            plt.savefig(filename_p_png, dpi=300, bbox_inches='tight')
+            
+            print(f">> Standalone graphs saved! Opening windows... Close them to continue.")
+            plt.show()
+
+    add_another = input("\nWould you like to analyze and overlay another EOS? (y/n): ").strip().lower()
+    if add_another != 'y':
+        break
+
+print("\nPreparing your final comparative graphs...")
+
+colors = ['#FF3366', '#00C49F', '#118AB2', '#FF9F1C']
+line_styles = ['-', '--', ':', '-.']
+line_widths = [5.0, 3.0, 2.0, 1.2]
+
+v_min_graph = np.min(V) * 0.90
+v_max_graph = np.max(V) * 1.10
+V_smooth_master = np.linspace(v_min_graph, v_max_graph, 1000)
+
+# --- FINAL ENERGY COMPARISON ---
+fig_e = plt.figure(figsize=(9, 6))
+plt.scatter(V, E, color='black', label='DFT Input Data', zorder=5)
+
+for index, item in enumerate(history):
+    saved_name, saved_func, saved_popt = item[0], item[1], item[2]
+    E_smooth = saved_func(V_smooth_master, *saved_popt)
+    
+    line_color = colors[index % len(colors)]
+    style = line_styles[index % len(line_styles)]
+    weight = line_widths[index % len(line_widths)]
+    
+    plt.plot(V_smooth_master, E_smooth, color=line_color, linestyle=style, linewidth=weight, label=f'{saved_name} Fit')
+
+plt.title("Comparative EOS Fitting (Energy)", fontsize=14, fontweight='bold')
+plt.xlabel("Volume (bohr³/atom)", fontsize=12)
+plt.ylabel("Energy (Ry/atom)", fontsize=12)
+plt.legend()
+if show_grid: plt.grid(True, linestyle='--', alpha=0.6)
+
+# --- FINAL PRESSURE COMPARISON ---
+fig_p = plt.figure(figsize=(9, 6))
+
+for index, item in enumerate(history):
+    saved_name, saved_func, saved_popt = item[0], item[1], item[2]
+    P_smooth = calculate_pressure(saved_func, V_smooth_master, saved_popt)
+    
+    line_color = colors[index % len(colors)]
+    style = line_styles[index % len(line_styles)]
+    weight = line_widths[index % len(line_widths)]
+    
+    plt.plot(V_smooth_master, P_smooth, color=line_color, linestyle=style, linewidth=weight, label=f'{saved_name} Fit')
+
+plt.title("Comparative EOS Fitting (Pressure)", fontsize=14, fontweight='bold')
+plt.xlabel("Volume (bohr³/atom)", fontsize=12)
+plt.ylabel("Pressure (GPa)", fontsize=12)
+plt.legend()
+if show_grid: plt.grid(True, linestyle='--', alpha=0.6)
+
+save_graphs = input("\nDo you want to save these final comparative graphs? (y/n): ").strip().lower()
+if save_graphs == 'y':
+    plt.figure(fig_e.number)
+    plt.savefig("Final_Comparison_Energy.png", dpi=300, bbox_inches='tight')
+    plt.figure(fig_p.number)
+    plt.savefig("Final_Comparison_Pressure.png", dpi=300, bbox_inches='tight')
+    print(">> Final comparative graphs saved successfully!")
+
+print("\nOpening final graph windows... Close the graphical windows to end the script.")
+plt.show()
